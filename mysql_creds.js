@@ -10,7 +10,7 @@ class DBLink{
 		this.tstate = DBLink.STATE_TRANS_IDLE;
 		this.TO = 60000;
 	}
-	query(sql,vals){
+	query(sql,vals,log_sql = false){
 		return new Promise((complete,fail)=>{
 			const result = this.link.query({
 				sql:sql,
@@ -22,7 +22,7 @@ class DBLink{
 					else 
 						complete(r,f);
 				});
-			console.log(result.sql);
+			if (log_sql) {console.log(result.sql)};
 		});
 	}
 	end(){
