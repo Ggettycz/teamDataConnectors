@@ -194,6 +194,7 @@ class Connector{
 Connector.TO_EXPORT_STATUS = 64; // default status to be exported .. data already aggregated
 Connector.DEFAULT_ACTIVE_INTERVAL = 168; // default active interval to NOT be exported and deleted 
 Connector.DEFAULT_RECORDS_LIMIT = 10000;
+Connector.MAX_SQL_SIZE = 900000; // the max size is more than 1M, just to be sure
 
 module.exports = {
 	Connector:Connector

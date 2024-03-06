@@ -30,6 +30,7 @@ class FileExport extends Connector{
         if (this.configuration.exportActive === undefined) { this.configuration.exportActive = FileExport.DEFAULT_EXPORT_ACTIVE;}
         if (this.configuration.recordsLimit === undefined) { this.configuration.recordsLimit = Connector.DEFAULT_RECORDS_LIMIT;}
         if (this.configuration.dataPath === undefined) { this.configuration.dataPath = FileExport.dataPath;}
+        if (this.configuration.nextRun === undefined) { this.configuration.nextRun = FileExport.DEFAULT_NEXT_RUN;}
         logMessage('default configuration set where missing:' + this.configurationValidated ,'DEBUG');
         logMessage('actual configuration: ' + JSON.stringify(this.configuration), 'TRACE');
         return isValidConfig;
@@ -81,6 +82,60 @@ class FileExport extends Connector{
         return this.link.query(query,[this.configuration.paramIdsList,
                 this.configuration.fromDate, this.configuration.toDate, this.configuration.recordsLimit], true);
 
+    }
+
+    async runConnector(){
+        let finished = false;
+        if (! await this.verifyConfiguration()) { 
+            logMessage('Configuration for Connector is NOT valid');
+            return false;
+        }
+        logMessage('Provided configuration:' + JSON.stringify(this.configuration), 'DEBUG');
+        while (!finished) {
+            if (!await this.storeRunStatus('Start')) {
+                logMessage('Issue with storing the Connector Run Status');
+                return false;
+            }
+    
+            // get data to be exported ... 
+            const records= await this.getRecordsToBeProcessed();
+            const numberOfRecords = records.length;
+            let failedRows = 0;
+            logMessage('got records to be processed:' + numberOfRecords,'DEBUG');
+            if (numberOfRecords>0) {
+                const fileStructure = this.prepareBasicStructure(records);
+                // store them to correct path/file
+                if (! await this.exportDataToFile(fileStructure.export)) { continue; }
+                // delete rows from table if requied
+                //logMessage('done, counting rest', 'INFO'); ///REMOVE
+
+                if (this.configuration.deleteAfterExport) {
+                    failedRows =  numberOfRecords - await this.deleteProcessedData();
+                    if (failedRows > 0) {
+                        logMessage('There was some issue in deleting data');
+                    }
+                }
+
+                await this.compressExportedFile();
+                // -- this.helper('getParamIDsCount');
+            } else {
+                logMessage('Nothing to export end of connector run','INFO');
+            }
+
+            let result = await this.finishRun(numberOfRecords,failedRows);
+            let valid = (result.insertId !== undefined); 
+            if (!valid) { logMessage('Status of finished run not properly stored', 'ERROR'); }
+            const nextRun = (numberOfRecords<this.configuration.recordsLimit)? this.configuration.nextRun:0;
+            logMessage(`Number of processed (${numberOfRecords}) x limit: `
+                +  `(${this.configuration.recordsLimit}), nextRun: ${nextRun}`,'DEBUG');
+            result = await this.updateNextRun(nextRun);
+            if ((result.changedRows!=1) || (result.warningCount!=0)) {
+                logMessage('Result of Run was not properly stored', 'ERROR');
+                valid = false;
+            }
+            if (nextRun>0) { finished = true; }
+        }
+        return finished;
     }
 
 
@@ -223,10 +278,30 @@ class FileExport extends Connector{
     }
 
     async deleteProcessedData(){
-        if (this.noIDsToProcess()) {return false}
-        const query = "DELETE from DataRecordNumberParameters where ID in (?)"
-        const result = await this.link.query(query,[this.processedIDs]);
-        return result.affectedRows;
+        if (this.noIDsToProcess()) {return false;}
+        // there is an issue, if the lengthe of the request is bigger than 1M .. this can happen 
+        // in case there are many rows to delete ... with long IDs
+        const query = "DELETE from DataRecordNumberParameters where ID in (?)";
+        let affectedRows = 0;
+        if (this.processedIDs.length>Connector.MAX_SQL_SIZE) {
+            const ids = this.processedIDs.split(',');
+            const numParts = Math.ceil(this.processedIDs.length / Connector.MAX_SQL_SIZE) + 1;
+            const idsPerPart = Math.ceil(ids.length / numParts);
+            logMessage(`Number of deleted rows is too big .. splitting to ${numParts} smaller parts with ${idsPerPart}`, 'WARN');
+            // split the this.proccesedIDs to smaller strings and run the query with them
+            for (let i = 0; i < numParts; i++) {
+                const start = i * idsPerPart;
+                const end = Math.min(start + idsPerPart, ids.length);
+                logMessage(`Processing the ${i}.th part from ${start} to ${end}`,'DEBUG');
+                const result = await this.link.query(query,[ids.slice(start, end).join(',')]);
+                affectedRows += result.affectedRows;
+            }
+        } else {
+            const result = await this.link.query(query,[this.processedIDs]);
+            affectedRows = result.affectedRows;
+        }
+
+        return affectedRows;
     }
 
     async helper(toHelp){
@@ -257,6 +332,8 @@ class FileExport extends Connector{
 
 FileExport.DEFAULT_WHOLE_DAY_EXPORT = true; 
 FileExport.DEFAULT_EXPORT_ACTIVE = false;
+FileExport.DEFAULT_NEXT_RUN = 23; // almost one day ... as this is written at the end of processing 24 is too much
+
 
 FileExport.EXPORT_STRUCTURE_BASIC = 'Basic';
 FileExport.EXPORT_STRUCTURE_TIMESERIES = 'TimeSeries';
